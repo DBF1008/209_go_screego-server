@@ -66,6 +66,29 @@ func (r *Generator) AllocatePacketConn(network string, requestedPort int) (net.P
 	return conn, &relayAddr, err
 }
 
+func (r *Generator) AllocateConn(network string, requestedPort int) (net.Conn, net.Addr, error) {
+	conn, addr, err := r.RelayAddressGenerator.AllocateConn(network, requestedPort)
+	if err != nil {
+		return conn, addr, err
+	}
+	relayAddr := *addr.(*net.TCPAddr)
+
+	v4, v6, err := r.IPProvider.Get()
+	if err != nil {
+		return conn, addr, err
+	}
+
+	if v6 == nil || (relayAddr.IP.To4() != nil && v4 != nil) {
+		relayAddr.IP = v4
+	} else {
+		relayAddr.IP = v6
+	}
+	if err == nil {
+		log.Debug().Str("addr", addr.String()).Str("relayaddr", relayAddr.String()).Msg("TURN allocated TCP")
+	}
+	return conn, &relayAddr, err
+}
+
 func Start(conf config.Config) (Server, error) {
 	if conf.TurnExternal {
 		return newExternalServer(conf)

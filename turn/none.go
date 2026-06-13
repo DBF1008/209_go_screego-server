@@ -1,7 +1,6 @@
 package turn
 
 import (
-	"errors"
 	"net"
 	"strconv"
 )
@@ -22,5 +21,11 @@ func (r *RelayAddressGeneratorNone) AllocatePacketConn(network string, requested
 }
 
 func (r *RelayAddressGeneratorNone) AllocateConn(network string, requestedPort int) (net.Conn, net.Addr, error) {
-	return nil, nil, errors.New("todo")
+	listener, err := net.Listen("tcp", ":"+strconv.Itoa(requestedPort))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	lc := &listenerConn{listener: listener}
+	return lc, listener.Addr(), nil
 }
