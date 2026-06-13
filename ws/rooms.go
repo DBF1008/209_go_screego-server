@@ -129,12 +129,13 @@ func (r *Rooms) Count() (int, string) {
 }
 
 // removeUserFromRoom is the single authoritative entry point for "a user
-// leaves a room." It orchestrates all four leave scenarios:
+// leaves a room." It orchestrates all five leave scenarios:
 //
 //  1. Normal member leaves → close their sessions, notify remaining users
-//  2. Owner leaves + CloseOnOwnerLeave=false → same as normal member
+//  2. Owner leaves + CloseOnOwnerLeave=false → transfer ownership, notify remaining
 //  3. Owner leaves + CloseOnOwnerLeave=true → force-disconnect all, destroy room
 //  4. Last user leaves (room empty) → destroy room
+//  5. User not in room / room doesn't exist → no-op
 //
 // Connection-level concerns (removing from rooms.connected, sending the
 // departing user's CloseWriter) are handled by the caller before invoking
@@ -163,6 +164,13 @@ func (rs *Rooms) removeUserFromRoom(roomID string, userID xid.ID) {
 		// closeRoom force-disconnects all remaining users and tears down.
 		rs.closeRoom(roomID)
 		return
+	}
+
+	// If the leaving user was the owner and the room survives, hand
+	// ownership to one of the remaining members so the room never
+	// enters an "ownerless" state.
+	if isOwner && len(room.Users) > 0 {
+		room.transferOwnership()
 	}
 
 	if len(room.Users) == 0 {

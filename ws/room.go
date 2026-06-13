@@ -91,6 +91,23 @@ func (r *Room) closeSession(rooms *Rooms, id xid.ID) {
 	sessionClosedTotal.Inc()
 }
 
+// transferOwnership assigns Owner=true to one of the remaining users when
+// the current owner has left. It picks the first user encountered during
+// map iteration (Go map order is random, which is acceptable here — any
+// surviving member is a valid candidate). Returns the new owner's ID and
+// true, or zero ID and false if the room has no remaining users.
+func (r *Room) transferOwnership() (xid.ID, bool) {
+	for _, member := range r.Users {
+		member.Owner = true
+		log.Debug().
+			Str("room", r.ID).
+			Str("newOwner", member.ID.String()).
+			Msg("ownership transferred to remaining member")
+		return member.ID, true
+	}
+	return xid.ID{}, false
+}
+
 // removeUser deletes a user from the room's Users map and increments
 // usersLeftTotal. Returns true if the user was present and removed.
 // This is a pure data mutation — it does NOT close sessions or trigger
