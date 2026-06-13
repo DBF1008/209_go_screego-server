@@ -155,18 +155,40 @@ func (a *ExternalServer) Disallow(username string) {
 	// not supported, will expire on TTL
 }
 
+// extractIP extracts the net.IP from a net.Addr.
+// pion/turn passes either *net.UDPAddr or *net.TCPAddr depending on transport.
+func extractIP(addr net.Addr) net.IP {
+	switch a := addr.(type) {
+	case *net.UDPAddr:
+		return a.IP
+	case *net.TCPAddr:
+		return a.IP
+	default:
+		return nil
+	}
+}
+
 func (a *InternalServer) authenticate(username, realm string, addr net.Addr) ([]byte, bool) {
 	a.lock.RLock()
 	defer a.lock.RUnlock()
 
 	entry, ok := a.lookup[username]
-
 	if !ok {
 		log.Debug().Interface("addr", addr).Str("username", username).Msg("TURN username not found")
 		return nil, false
 	}
 
-	log.Debug().Interface("addr", addr.String()).Str("realm", realm).Msg("TURN authenticated")
+	requestIP := extractIP(addr)
+	if requestIP == nil || !requestIP.Equal(entry.addr) {
+		log.Warn().
+			Str("username", username).
+			Str("expected", entry.addr.String()).
+			Str("got", addr.String()).
+			Msg("TURN IP mismatch, rejecting authentication")
+		return nil, false
+	}
+
+	log.Debug().Str("addr", addr.String()).Str("realm", realm).Msg("TURN authenticated")
 	return entry.password, true
 }
 
