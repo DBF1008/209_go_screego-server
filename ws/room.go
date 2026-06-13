@@ -104,6 +104,37 @@ func (r *Room) removeUser(userID xid.ID) bool {
 	return true
 }
 
+// electOwner promotes a remaining user to room owner when the previous
+// owner has left but the room continues to exist (CloseOnOwnerLeave=false).
+// Without this, notifyInfoChanged would broadcast a member list in which no
+// one is Owner, leaving the room permanently anchorless for owner-based
+// management, default display, and future control features.
+//
+// The most senior remaining user is chosen: xid.IDs embed a big-endian
+// timestamp, so the smallest ID corresponds to the earliest-joined member.
+// This makes the choice deterministic and stable across calls.
+//
+// It is a no-op returning nil if the room already has an owner (so it is
+// safe to call when no transfer is needed) or if no users remain. On
+// success it marks the chosen user Owner and returns them.
+func (r *Room) electOwner() *User {
+	var next *User
+	for _, user := range r.Users {
+		if user.Owner {
+			// An owner is already present; no transfer needed.
+			return nil
+		}
+		if next == nil || user.ID.Compare(next.ID) < 0 {
+			next = user
+		}
+	}
+	if next == nil {
+		return nil
+	}
+	next.Owner = true
+	return next
+}
+
 // closeUserSessions closes every session where userID participates as
 // host OR client. For each closed session, an EndShare notification is
 // sent to the surviving peer (if still present in the room), TURN

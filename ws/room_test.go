@@ -769,6 +769,228 @@ func TestNotifyInfoChanged_SortOrder(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Owner auto-transfer when the owner goes offline but the room is kept
+// (CloseOnOwnerLeave=false). The most senior remaining user — smallest
+// xid.ID, i.e. earliest joined — is promoted so the room never broadcasts a
+// permanently owner-less member list.
+// ---------------------------------------------------------------------------
+
+// ownersInRoomMsg returns the IDs of every user flagged Owner=true in the
+// first Room (info) message found, or nil if no Room message is present.
+func ownersInRoomMsg(msgs []outgoing.Message) []xid.ID {
+	for _, m := range msgs {
+		if rm, ok := m.(outgoing.Room); ok {
+			var owners []xid.ID
+			for _, u := range rm.Users {
+				if u.Owner {
+					owners = append(owners, u.ID)
+				}
+			}
+			return owners
+		}
+	}
+	return nil
+}
+
+// minID returns the smallest of the given xid.IDs, matching the
+// earliest-joined anchor that electOwner is expected to select.
+func minID(ids ...xid.ID) xid.ID {
+	m := ids[0]
+	for _, id := range ids[1:] {
+		if id.Compare(m) < 0 {
+			m = id
+		}
+	}
+	return m
+}
+
+func TestRemoveUserFromRoom_OwnerLeaves_PromotesNewOwner(t *testing.T) {
+	tc := newTestContext()
+	tc.addRoom("r1", false, ConnectionSTUN) // CloseOnOwnerLeave = false
+
+	ownerID := xid.New()
+	memberA := xid.New()
+	memberB := xid.New()
+	tc.addUser("r1", ownerID, true, false)
+	tc.addUser("r1", memberA, false, false)
+	tc.addUser("r1", memberB, false, false)
+
+	expectedOwner := minID(memberA, memberB)
+
+	tc.rooms.removeUserFromRoom("r1", ownerID)
+
+	room := tc.rooms.Rooms["r1"]
+	if room == nil {
+		t.Fatal("room should survive when CloseOnOwnerLeave=false")
+	}
+	if len(room.Users) != 2 {
+		t.Fatalf("expected 2 remaining users, got %d", len(room.Users))
+	}
+
+	// Exactly one remaining user must be owner, and it must be the
+	// earliest-joined (smallest ID) member.
+	owners := []xid.ID{}
+	for id, u := range room.Users {
+		if u.Owner {
+			owners = append(owners, id)
+		}
+	}
+	if len(owners) != 1 {
+		t.Fatalf("expected exactly 1 owner after transfer, got %d", len(owners))
+	}
+	if owners[0] != expectedOwner {
+		t.Fatalf("expected earliest-joined member %s to be promoted, got %s", expectedOwner, owners[0])
+	}
+
+	// The broadcast must reflect the new owner — no owner-less list.
+	for _, id := range []xid.ID{memberA, memberB} {
+		got := ownersInRoomMsg(tc.collectMessages(id))
+		if len(got) != 1 || got[0] != expectedOwner {
+			t.Errorf("user %s: broadcast should list exactly the new owner %s, got %v", id, expectedOwner, got)
+		}
+	}
+}
+
+func TestRemoveUserFromRoom_OwnerLeavesAgain_RepromotesOwner(t *testing.T) {
+	tc := newTestContext()
+	tc.addRoom("r1", false, ConnectionSTUN)
+
+	ownerID := xid.New()
+	memberA := xid.New()
+	memberB := xid.New()
+	tc.addUser("r1", ownerID, true, false)
+	tc.addUser("r1", memberA, false, false)
+	tc.addUser("r1", memberB, false, false)
+
+	// First departure: the original owner leaves.
+	tc.rooms.removeUserFromRoom("r1", ownerID)
+
+	firstNewOwner := minID(memberA, memberB)
+	room := tc.rooms.Rooms["r1"]
+	if u, ok := room.Users[firstNewOwner]; !ok || !u.Owner {
+		t.Fatalf("after first departure, %s should be the new owner", firstNewOwner)
+	}
+
+	// Second departure: the freshly-promoted owner ALSO leaves. The single
+	// remaining member must be promoted in turn — the transfer re-arms
+	// rather than leaving the room owner-less.
+	tc.rooms.removeUserFromRoom("r1", firstNewOwner)
+
+	room = tc.rooms.Rooms["r1"]
+	if room == nil {
+		t.Fatal("room should still survive after the second owner leaves")
+	}
+	if len(room.Users) != 1 {
+		t.Fatalf("expected 1 remaining user, got %d", len(room.Users))
+	}
+
+	// The remaining member is whichever of A/B was NOT the first new owner.
+	lastMember := memberA
+	if firstNewOwner == memberA {
+		lastMember = memberB
+	}
+	if u, ok := room.Users[lastMember]; !ok || !u.Owner {
+		t.Fatalf("after second departure, remaining member %s should be promoted to owner", lastMember)
+	}
+}
+
+func TestRemoveUserFromRoom_OwnerLeaves_CloseOnOwnerLeave_NoPromotion(t *testing.T) {
+	tc := newTestContext()
+	tc.addRoom("r1", true, ConnectionSTUN) // CloseOnOwnerLeave = true
+
+	ownerID := xid.New()
+	memberID := xid.New()
+	tc.addUser("r1", ownerID, true, false)
+	tc.addUser("r1", memberID, false, false)
+
+	tc.rooms.removeUserFromRoom("r1", ownerID)
+
+	// The room must be torn down — the promotion path must NOT keep it alive.
+	if _, exists := tc.rooms.Rooms["r1"]; exists {
+		t.Fatal("room should be destroyed when owner leaves and CloseOnOwnerLeave=true")
+	}
+	// The remaining member is force-disconnected, not promoted.
+	if _, connected := tc.rooms.connected[memberID]; connected {
+		t.Fatal("member should be force-disconnected, not promoted")
+	}
+
+	memberMsgs := tc.collectMessages(memberID)
+	// The close branch sends CloseWriter and must NOT emit an info broadcast.
+	if countCloseWriter(memberMsgs) != 1 {
+		t.Errorf("member expected 1 CloseWriter, got %d", countCloseWriter(memberMsgs))
+	}
+	if countRoomMsg(memberMsgs) != 0 {
+		t.Errorf("member should not receive a Room info broadcast on owner-leave-close, got %d", countRoomMsg(memberMsgs))
+	}
+}
+
+func TestElectOwner_PicksEarliestJoined(t *testing.T) {
+	tc := newTestContext()
+	tc.addRoom("r1", false, ConnectionSTUN)
+
+	a := xid.New()
+	b := xid.New()
+	c := xid.New()
+	tc.addUser("r1", a, false, false)
+	tc.addUser("r1", b, false, false)
+	tc.addUser("r1", c, false, false)
+
+	expected := minID(a, b, c)
+
+	room := tc.rooms.Rooms["r1"]
+	promoted := room.electOwner()
+
+	if promoted == nil {
+		t.Fatal("electOwner should promote a user when none is owner")
+	}
+	if promoted.ID != expected {
+		t.Fatalf("expected earliest-joined %s to be promoted, got %s", expected, promoted.ID)
+	}
+	if !room.Users[expected].Owner {
+		t.Fatal("promoted user should have Owner=true")
+	}
+	// Every other user must remain a non-owner.
+	for id, u := range room.Users {
+		if id != expected && u.Owner {
+			t.Errorf("user %s should not be owner", id)
+		}
+	}
+}
+
+func TestElectOwner_NoopWhenOwnerExists(t *testing.T) {
+	tc := newTestContext()
+	tc.addRoom("r1", false, ConnectionSTUN)
+
+	ownerID := xid.New()
+	memberID := xid.New()
+	tc.addUser("r1", ownerID, true, false)
+	tc.addUser("r1", memberID, false, false)
+
+	room := tc.rooms.Rooms["r1"]
+	promoted := room.electOwner()
+
+	if promoted != nil {
+		t.Fatalf("electOwner should be a no-op when an owner exists, promoted %s", promoted.ID)
+	}
+	if !room.Users[ownerID].Owner {
+		t.Fatal("existing owner should remain owner")
+	}
+	if room.Users[memberID].Owner {
+		t.Fatal("member should not be promoted while an owner exists")
+	}
+}
+
+func TestElectOwner_NoopWhenEmpty(t *testing.T) {
+	tc := newTestContext()
+	tc.addRoom("r1", false, ConnectionSTUN)
+
+	room := tc.rooms.Rooms["r1"]
+	if promoted := room.electOwner(); promoted != nil {
+		t.Fatalf("electOwner on an empty room should return nil, got %s", promoted.ID)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Unused import guard
 // ---------------------------------------------------------------------------
 

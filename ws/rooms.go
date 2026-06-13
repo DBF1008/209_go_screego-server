@@ -132,7 +132,8 @@ func (r *Rooms) Count() (int, string) {
 // leaves a room." It orchestrates all four leave scenarios:
 //
 //  1. Normal member leaves → close their sessions, notify remaining users
-//  2. Owner leaves + CloseOnOwnerLeave=false → same as normal member
+//  2. Owner leaves + CloseOnOwnerLeave=false → promote a remaining user to
+//     owner (see Room.electOwner), then notify remaining users
 //  3. Owner leaves + CloseOnOwnerLeave=true → force-disconnect all, destroy room
 //  4. Last user leaves (room empty) → destroy room
 //
@@ -168,6 +169,15 @@ func (rs *Rooms) removeUserFromRoom(roomID string, userID xid.ID) {
 	if len(room.Users) == 0 {
 		rs.closeRoom(roomID)
 		return
+	}
+
+	// The owner left but the room continues (scenario 2). Promote a
+	// remaining user so the room keeps an owner anchor instead of
+	// broadcasting a permanently owner-less member list. Only the
+	// owner's departure triggers this; a normal member leaving must
+	// not disturb the existing owner.
+	if isOwner {
+		room.electOwner()
 	}
 
 	room.notifyInfoChanged()
