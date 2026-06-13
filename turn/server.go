@@ -166,8 +166,38 @@ func (a *InternalServer) authenticate(username, realm string, addr net.Addr) ([]
 		return nil, false
 	}
 
+	// Credentials are bound to the client IP they were issued for. Reject any
+	// TURN request whose source address differs, so a leaked username/password
+	// cannot be replayed from another host.
+	ip := ipFromAddr(addr)
+	if ip == nil || !entry.addr.Equal(ip) {
+		log.Debug().Interface("addr", addr).Str("username", username).Msg("TURN client address does not match the address that requested the credentials")
+		return nil, false
+	}
+
 	log.Debug().Interface("addr", addr.String()).Str("realm", realm).Msg("TURN authenticated")
 	return entry.password, true
+}
+
+// ipFromAddr resolves the IP of a TURN client address. The internal TURN
+// server matches it against the IP recorded when the credentials were issued,
+// so an address that cannot be resolved to an IP yields a nil result and is
+// treated as a mismatch (fail closed).
+func ipFromAddr(addr net.Addr) net.IP {
+	switch a := addr.(type) {
+	case *net.UDPAddr:
+		return a.IP
+	case *net.TCPAddr:
+		return a.IP
+	case *net.IPAddr:
+		return a.IP
+	default:
+		host, _, err := net.SplitHostPort(addr.String())
+		if err != nil {
+			return nil
+		}
+		return net.ParseIP(host)
+	}
 }
 
 func (a *InternalServer) Credentials(id string, addr net.IP) (string, string) {
