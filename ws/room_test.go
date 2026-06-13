@@ -2,7 +2,6 @@ package ws
 
 import (
 	"net"
-	"sort"
 	"testing"
 	"time"
 
@@ -767,9 +766,3 @@ func TestNotifyInfoChanged_SortOrder(t *testing.T) {
 		t.Error("users should be sorted: owner first, then streaming, then alphabetical")
 	}
 }
-
-// ---------------------------------------------------------------------------
-// Unused import guard
-// ---------------------------------------------------------------------------
-
-var _ = sort.Slice // ensure sort import is not flagged as unused
