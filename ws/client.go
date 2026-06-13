@@ -43,11 +43,16 @@ type ClientInfo struct {
 	ID                xid.ID
 	Authenticated     bool
 	AuthenticatedUser string
-	Write             chan outgoing.Message
-	Addr              net.IP
+	// AuthSessionID is the server-side session id captured at WebSocket
+	// handshake. It is re-validated against the live session store on every
+	// message (see Rooms.refreshAuth) so that logout or session expiry revokes
+	// this connection's privileges, rather than them being frozen at handshake.
+	AuthSessionID string
+	Write         chan outgoing.Message
+	Addr          net.IP
 }
 
-func newClient(conn *websocket.Conn, req *http.Request, read chan ClientMessage, authenticatedUser string, authenticated, trustProxy bool) *Client {
+func newClient(conn *websocket.Conn, req *http.Request, read chan ClientMessage, authenticatedUser string, authenticated bool, authSessionID string, trustProxy bool) *Client {
 	ip := conn.RemoteAddr().(*net.TCPAddr).IP
 	if realIP := req.Header.Get("X-Real-IP"); trustProxy && realIP != "" {
 		ip = net.ParseIP(realIP)
@@ -58,6 +63,7 @@ func newClient(conn *websocket.Conn, req *http.Request, read chan ClientMessage,
 		info: ClientInfo{
 			Authenticated:     authenticated,
 			AuthenticatedUser: authenticatedUser,
+			AuthSessionID:     authSessionID,
 			ID:                xid.New(),
 			Addr:              ip,
 			Write:             make(chan outgoing.Message, 1),

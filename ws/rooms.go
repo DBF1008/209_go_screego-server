@@ -88,8 +88,9 @@ func (r *Rooms) Upgrade(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	user, loggedIn := r.users.CurrentUser(req)
-	c := newClient(conn, req, r.Incoming, user, loggedIn, r.config.TrustProxyHeaders)
+	sid := r.users.SessionID(req)
+	user, loggedIn := r.users.SessionUser(sid)
+	c := newClient(conn, req, r.Incoming, user, loggedIn, sid, r.config.TrustProxyHeaders)
 	r.Incoming <- ClientMessage{Info: c.info, Incoming: Connected{}, SkipConnectedCheck: true}
 
 	go c.startReading(time.Second * 20)
@@ -104,11 +105,36 @@ func (r *Rooms) Start() {
 			continue
 		}
 
+		// Re-evaluate authentication against the live session store: a socket
+		// opened while logged in must lose its privileges once the session is
+		// logged out or expires.
+		msg.Info = r.refreshAuth(msg.Info)
+
 		if err := msg.Incoming.Execute(r, msg.Info); err != nil {
 			dis := Disconnected{Code: websocket.CloseNormalClosure, Reason: err.Error()}
 			dis.executeNoError(r, msg.Info)
 		}
 	}
+}
+
+// refreshAuth re-evaluates a client's authentication against the live session
+// store. A WebSocket can stay connected long after its session was revoked by
+// logout or has expired; the Authenticated/AuthenticatedUser values captured at
+// handshake must therefore be refreshed before every action, otherwise a
+// stale-but-open socket would keep passing checkAuth and keep obtaining TURN
+// credentials. Messages without a live session resolve to the guest.
+func (r *Rooms) refreshAuth(info ClientInfo) ClientInfo {
+	if r.users == nil {
+		return info
+	}
+	user, ok := r.users.SessionUser(info.AuthSessionID)
+	info.Authenticated = ok
+	if ok {
+		info.AuthenticatedUser = user
+	} else {
+		info.AuthenticatedUser = ""
+	}
+	return info
 }
 
 func (r *Rooms) Count() (int, string) {
